@@ -9,6 +9,9 @@
 #ifdef __CUDACC__
 #define DGLDEVICE __device__
 #define DGLINLINE __forceinline__
+#elif defined(__HIPCC__)
+#define DGLDEVICE __host__ __device__
+#define DGLINLINE __forceinline__
 #else
 #define DGLDEVICE
 #define DGLINLINE inline

@@ -14,6 +14,11 @@
 #include "../../runtime/cuda/cuda_common.h"
 #include "./utils.h"
 
+// missing from hipify-perl mappings
+#ifdef DGL_USE_ROCM
+#define curand4 hiprand4
+#endif
+
 using namespace dgl::runtime;
 
 namespace dgl {

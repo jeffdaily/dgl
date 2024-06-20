@@ -152,6 +152,10 @@ inline const char* curandGetErrorString(curandStatus_t error) {
       return "CURAND_STATUS_ARCH_MISMATCH";
     case CURAND_STATUS_INTERNAL_ERROR:
       return "CURAND_STATUS_INTERNAL_ERROR";
+#ifdef DGL_USE_ROCM
+    case HIPRAND_STATUS_NOT_IMPLEMENTED:
+      return "HIPRAND_STATUS_NOT_IMPLEMENTED";
+#endif
   }
   // To suppress compiler warning.
   return "Unrecognized curand error string";

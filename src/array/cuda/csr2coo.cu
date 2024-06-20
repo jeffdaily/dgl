@@ -94,6 +94,9 @@ COOMatrix CSRToCOO<kDGLCUDA, int64_t>(CSRMatrix csr) {
   constexpr int64_t max_copy_at_once = std::numeric_limits<int32_t>::max();
   for (int64_t i = 0; i < csr.num_rows; i += max_copy_at_once) {
     std::size_t temp_storage_bytes = 0;
+    // TODO: hipcub does not have DeviceCopy
+    // stubbing out here to continue compilation assessment
+#ifndef DGL_USE_ROCM
     CUDA_CALL(cub::DeviceCopy::Batched(
         nullptr, temp_storage_bytes, input_buffer + i, output_buffer + i,
         buffer_sizes + i, std::min(csr.num_rows - i, max_copy_at_once),
@@ -105,6 +108,7 @@ COOMatrix CSRToCOO<kDGLCUDA, int64_t>(CSRMatrix csr) {
         temp.get(), temp_storage_bytes, input_buffer + i, output_buffer + i,
         buffer_sizes + i, std::min(csr.num_rows - i, max_copy_at_once),
         stream));
+#endif
   }
 
   return COOMatrix(

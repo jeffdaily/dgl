@@ -15,7 +15,7 @@
 #include "bf16.cuh"
 #include "fp16.cuh"
 
-#if __CUDA_ARCH__ >= 600
+#if __CUDA_ARCH__ >= 600 || defined(DGL_USE_ROCM)
 #include <cuda_fp16.h>
 #endif
 
@@ -116,6 +116,7 @@ struct Cast<double> {
   }
 };
 
+#ifndef DGL_USE_ROCM
 static __device__ __forceinline__ unsigned short int atomicCASshort(  // NOLINT
     unsigned short int* address,                                      // NOLINT
     unsigned short int compare,                                       // NOLINT
@@ -134,6 +135,84 @@ static __device__ __forceinline__ unsigned short int atomicCASshort(  // NOLINT
   return val;
 #endif  // (defined(__CUDA_ARCH__) && (__CUDA_ARCH__) >= 700)
 }
+#else // DGL_USE_ROCM
+template <typename T>
+struct AtomicFPOp;
+
+template <>
+struct AtomicFPOp<half> {
+  template <typename func_t>
+  inline __device__ half operator() (half *address, half val, const func_t& func) {
+    unsigned int * address_as_ui =
+      (unsigned int *) ((char *)address - ((size_t)address & 2));
+    unsigned int old = *address_as_ui;
+    unsigned int assumed;
+
+    __half_raw hsum;
+    do {
+      assumed = old;
+      hsum.x = (size_t)address & 2 ? (old >> 16) : (old & 0xffff);
+      hsum = func(hsum, val);
+      old = (size_t)address & 2 ? (old & 0xffff) | (hsum.x << 16) : (old & 0xffff0000) | hsum.x;
+      old = atomicCAS(address_as_ui, assumed, old);
+    } while (assumed != old);
+    hsum.x = (size_t)address & 2 ? (old >> 16) : (old & 0xffff);
+    return hsum;
+  }
+};
+
+template <typename T>
+inline __host__ __device__ T safe_max(T a, T b) {
+  #if defined(__HIPCC__)
+  // TODO: remove this special case for HIP when issue is fixed:
+  //       https://github.com/ROCm-Developer-Tools/HIP/issues/2209
+    T max = ::isnan(a) ? a : (::isnan(b) ? b : std::max<T>(a, b));
+  #else
+    T max = ::isnan(b) ? b : std::max<T>(a, b);
+  #endif
+
+  return max;
+}
+
+template <>
+inline __host__ __device__ half safe_max<half>(half a, half b) {
+  #if defined(__HIPCC__)
+  // TODO: remove this special case for HIP when issue is fixed:
+  //       https://github.com/ROCm-Developer-Tools/HIP/issues/2209
+    half max = ::__hisnan(a) ? a : (::__hisnan(b) ? b : std::max<half>(a, b));
+  #else
+    half max = ::__hisnan(b) ? b : std::max<half>(a, b);
+  #endif
+
+  return max;
+}
+
+template <typename T>
+inline __host__ __device__ T safe_min(T a, T b) {
+  #if defined(__HIPCC__)
+  // TODO: remove this special case for HIP when issue is fixed:
+  //       https://github.com/ROCm-Developer-Tools/HIP/issues/2209
+    T min = ::isnan(a) ? a : (::isnan(b) ? b : std::min<T>(a, b));
+  #else
+    T min = ::isnan(b) ? b : std::min<T>(a, b);
+  #endif
+
+  return min;
+}
+
+template <>
+inline __host__ __device__ half safe_min(half a, half b) {
+  #if defined(__HIPCC__)
+  // TODO: remove this special case for HIP when issue is fixed:
+  //       https://github.com/ROCm-Developer-Tools/HIP/issues/2209
+    half min = ::__hisnan(a) ? a : (::__hisnan(b) ? b : std::min<half>(a, b));
+  #else
+    half min = ::__hisnan(b) ? b : std::min<half>(a, b);
+  #endif
+
+  return min;
+}
+#endif
 
 #define DEFINE_ATOMIC(NAME)                                   \
   template <typename T>                                       \
@@ -151,6 +230,7 @@ static __device__ __forceinline__ unsigned short int atomicCASshort(  // NOLINT
     return Cast<T>::Decode(old);                              \
   }
 
+#ifndef DGL_USE_ROCM
 #define DEFINE_ATOMIC_16BIT(NAME, dtype)                           \
   template <>                                                      \
   __device__ __forceinline__ dtype Atomic##NAME<dtype>(            \
@@ -167,22 +247,40 @@ static __device__ __forceinline__ unsigned short int atomicCASshort(  // NOLINT
     } while (assumed != old);                                      \
     return Cast<dtype>::Decode(old);                               \
   }
+#else // DGL_USE_ROCM
+#define DEFINE_ATOMIC_16BIT(NAME, dtype)                           \
+  inline __device__ dtype Atomic##NAME(dtype * addr, dtype val) {  \
+    return AtomicFPOp<dtype>()(addr, val, [](dtype a, dtype b) { return OP_; }); \
+  }
+#endif
 
+#ifdef DGL_USE_ROCM
+#define OP(a, b) safe_max(a, b)
+#define OP_      safe_max(a, b)
+#else
 #define OP(a, b) max(a, b)
+#endif
 DEFINE_ATOMIC(Max)
 DEFINE_ATOMIC_16BIT(Max, half)
 #if BF16_ENABLED
 DEFINE_ATOMIC_16BIT(Max, __nv_bfloat16)
 #endif  // BF16_ENABLED
 #undef OP
+#undef OP_
 
+#ifdef DGL_USE_ROCM
+#define OP(a, b) safe_min(a, b)
+#define OP_      safe_min(a, b)
+#else
 #define OP(a, b) min(a, b)
+#endif
 DEFINE_ATOMIC(Min)
 DEFINE_ATOMIC_16BIT(Min, half)
 #if BF16_ENABLED
 DEFINE_ATOMIC_16BIT(Min, __nv_bfloat16)
 #endif  // BF16_ENABLED
 #undef OP
+#undef OP_
 
 #define OP(a, b) a + b
 DEFINE_ATOMIC(Add)
@@ -256,7 +354,7 @@ inline __device__ int32_t AtomicMax(int32_t* const address, const int32_t val) {
 
 template <>
 __device__ __forceinline__ float AtomicAdd<float>(float* addr, float val) {
-#if __CUDA_ARCH__ >= 200
+#if __CUDA_ARCH__ >= 200 || defined(DGL_USE_ROCM)
   return atomicAdd(addr, val);
 #else
   typedef float T;
@@ -270,12 +368,12 @@ __device__ __forceinline__ float AtomicAdd<float>(float* addr, float val) {
         addr_as_ui, assumed, Cast<T>::Encode(Cast<T>::Decode(old) + val));
   } while (assumed != old);
   return Cast<T>::Decode(old);
-#endif  // __CUDA_ARCH__
+#endif  // __CUDA_ARCH__ || defined(DGL_USE_ROCM)
 }
 
 template <>
 __device__ __forceinline__ double AtomicAdd<double>(double* addr, double val) {
-#if __CUDA_ARCH__ >= 600
+#if __CUDA_ARCH__ >= 600 || defined(DGL_USE_ROCM)
   return atomicAdd(addr, val);
 #else
   typedef double T;
@@ -292,12 +390,14 @@ __device__ __forceinline__ double AtomicAdd<double>(double* addr, double val) {
 #endif
 }
 
-#if defined(CUDART_VERSION) && CUDART_VERSION >= 10000
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 10000 || defined(DGL_USE_ROCM)
 template <>
 __device__ __forceinline__ half AtomicAdd<half>(half* addr, half val) {
 // make sure we have half support
 #if __CUDA_ARCH__ >= 700
   return atomicAdd(addr, val);
+#elif defined(DGL_USE_ROCM)
+  return AtomicFPOp<half>()(addr, val, [](half hsum, half val) { return hsum + val; });
 #else
   (void)addr;
   (void)val;

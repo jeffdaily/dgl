@@ -28,13 +28,27 @@ cublasStatus_t cublasGemm(
   return CUBLAS_STATUS_EXECUTION_FAILED;
 }
 
+#ifdef DGL_USE_ROCM
+#define CUBLAS_GEMM_DEFAULT_TENSOR_OP HIPBLAS_GEMM_DEFAULT
+#define __syncwarp()
+#endif
+
 template <>
 cublasStatus_t cublasGemm<__half>(
     cublasHandle_t handle, cublasOperation_t transa, cublasOperation_t transb,
     int m, int n, int k, const __half* alpha, const __half* A, int lda,
     const __half* B, int ldb, const __half* beta, __half* C, int ldc) {
+#ifdef DGL_USE_ROCM
+  float alpha_float = __half2float(*alpha);
+  float beta_float = __half2float(*beta);
+  return cublasGemmEx(
+      handle, transa, transb, m, n, k, &alpha_float, A, CUDA_R_16F, lda, B,
+      CUDA_R_16F, ldb, &beta_float, C, CUDA_R_16F, ldc, CUBLAS_COMPUTE_32F,
+      CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+#else
   return cublasHgemm(
       handle, transa, transb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+#endif
 }
 
 #if BF16_ENABLED
